@@ -618,3 +618,37 @@ def apply_model_init_dtype(
 
     _refresh_hsdp_precision_state(model)
     _validate_model_init_dtype(model, target_dtype)
+
+
+def _validate_optimize_dtype(
+        model: nn.Module,
+        fp32_main_params: bool,
+) -> None:
+    """Reject low-precision parameters when fp32 optimizer updates are disabled.
+
+    This check runs after model loading and ``model_init_dtype`` conversion,
+    before optimizer construction, so model initialization choices determine
+    whether optimizer updates use fp32 parameters.
+    """
+    if fp32_main_params:
+        return
+
+    low_precision_parameters = [
+        (name, parameter.dtype)
+        for name, parameter in model.named_parameters()
+        if parameter.dtype in (torch.float16, torch.bfloat16)
+    ]
+    if not low_precision_parameters:
+        return
+
+    parameter_summary = ", ".join(
+        f"{name} ({dtype})" for name, dtype in low_precision_parameters[:5]
+    )
+    if len(low_precision_parameters) > 5:
+        parameter_summary += ", ..."
+    raise ValueError(
+        "Optimizer updates require fp32 model parameters when "
+        "fp32_main_params is disabled; found low-precision parameters: "
+        f"{parameter_summary}. Set optimizer.fp32_main_params=true or set "
+        "model_init_dtype: float32."
+    )

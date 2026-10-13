@@ -148,6 +148,26 @@ def _resolve_dtensor_union():
     return torch_dt.DTensor | _import_hyper_dtensor()
 
 
+def is_dtensor(tensor: Any) -> bool:
+    """Return whether the tensor uses native or HyperParallel DTensor."""
+    dtensor_type = _LAZY_CACHE.get("DTensor") or _resolve_dtensor_union()
+    return isinstance(tensor, dtensor_type)
+
+
+def device_meshes_are_compatible(lhs: Any, rhs: Any) -> bool:
+    """Return whether two device meshes describe the same topology."""
+    if lhs is rhs:
+        return True
+    lhs_hash = getattr(lhs, "to_hash", None)
+    rhs_hash = getattr(rhs, "to_hash", None)
+    if callable(lhs_hash) and callable(rhs_hash):
+        return (
+            getattr(lhs, "device_type", None) == getattr(rhs, "device_type", None)
+            and lhs_hash() == rhs_hash()
+        )
+    return bool(lhs == rhs)
+
+
 def to_local_if_dtensor(tensor: Any) -> Any:
     """Return the local shard if `tensor` is a DTensor, otherwise return as-is."""
     # Use resolver directly for internal module lookups instead of lazy-loaded DTensor
