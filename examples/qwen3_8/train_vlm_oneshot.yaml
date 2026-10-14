@@ -31,6 +31,11 @@ accelerator:
 fsdp_config:
   dp_shard_size: 16
   replicate_params: []
+  mix_precision:
+    param_dtype: null
+    reduce_dtype: float32
+    output_dtype: null
+    cast_forward_inputs: true
   reshard_after_forward: true
   reshard_after_backward: true
   requires_grad_sync: true
@@ -40,7 +45,7 @@ fsdp_config:
 
 plan_overrides:
   - match: "*.linear_attn"
-    module_type: transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5GatedDeltaNet
+    module_type: transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeGatedDeltaNet
     exact_type: true
     replace_module:
       _target_: hyper_parallel.components.modules.TritonGDN
@@ -65,11 +70,9 @@ compile:
 dataset:
   data_transform:
     _target_: hyper_parallel.data.vlm.build_data_transform.build_vlm_data_transform
-    # Document VLM defaults: doc pages need ~1-4M pixels and long targets
-    # (HTML/markdown) need room beyond the vision tokens.
-    max_seq_len: 8192
-    min_pixels: 65536
-    max_pixels: 4194304
+    max_seq_len: 1024
+    min_pixels: 4096
+    max_pixels: 262144
   _target_: hyper_parallel.data.vlm.dataset.build_vlm_dataset
   data_config:
     manifest: null
@@ -98,6 +101,7 @@ dataloader:
 
 optimizer:
   _target_: hyper_parallel.components.optim.AdamW
+  fp32_main_params: false
   no_decay_params: [bias, norm, ln_]
   adamw_config:
     adamw_lr: 1.0e-5

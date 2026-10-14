@@ -219,6 +219,7 @@ def create_distributed_setup_from_config(cfg: Any) -> DistributedSetup:
     return DistributedSetup(
         mesh_context=mesh_context,
         strategy_config=strategy_config,
+        allow_uncovered_params=True,
         # plan_overrides/module_replacements stay unset here: the Trainer
         # desugars the raw YAML entries onto the setup (05 §15.2.6) before
         # model construction.

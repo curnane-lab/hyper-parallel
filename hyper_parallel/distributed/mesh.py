@@ -253,6 +253,9 @@ class DistributedSetup:
     # construction and sharding consume one resolved policy object.
     low_precision_config: Any = None
     fp32_main_params: bool = False
+    # F4b escape hatch consumed by ShardingPlanner. False keeps uncovered
+    # trainable parameters a hard error; the trainer sets this True.
+    allow_uncovered_params: bool = False
 
 
 def _build_device_mesh_from_accelerator(

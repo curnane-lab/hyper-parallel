@@ -13,6 +13,8 @@
 #   bash run_vlm_train.sh
 #
 # Environment variables:
+#   CODE_DIR          (optional) repo root when this script is launched from
+#                                outside the checkout (default: script dir).
 #   MODEL_PATH        (required) HF weights dir of the base model.
 #   DATA_PATH         (required) Parquet file, glob, directory, or manifest
 #                                JSON. Directories need RECURSIVE=true when
@@ -27,10 +29,9 @@
 #   MICRO_BATCH       (default 1)
 #   GLOBAL_BATCH      (default = MICRO_BATCH * dp_size, one micro-step)
 #   TRAIN_ITERS       (default 10)
-#   MAX_SEQ_LEN       (default 8192)
-#   MAX_PIXELS        (default 4194304) image token budget (~area/784);
-#                                doc pages need ~1-4M px to stay readable
-#   MIN_PIXELS        (default 65536)
+#   MAX_SEQ_LEN       (default 1024)
+#   MAX_PIXELS        (default 262144)  image token budget (~area/1024)
+#   MIN_PIXELS        (default 4096)
 #   SCHEMA_ADAPTER    (default auto)    qwen_vl | fintabnet_otsl | llava |
 #                                       image_text_pair | auto
 #   RECURSIVE         (default false)   recursive scan for dir DATA_PATH
@@ -54,8 +55,9 @@
 # ============================================================================
 set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-PROJECT_ROOT=$(cd "${SCRIPT_DIR}" && pwd)
+CODE_DIR=${CODE_DIR:-$(cd "$(dirname "$0")" && pwd)}
+PROJECT_ROOT=$(cd "${CODE_DIR}" && pwd)
+SCRIPT_DIR="${PROJECT_ROOT}"
 
 # ---- required arguments ------------------------------------------------------
 : "${MODEL_PATH:?Set MODEL_PATH to the base model directory (HF format)}"
@@ -73,9 +75,9 @@ RDZV_ID=${RDZV_ID:-qwen38_vlm_$$}
 # ---- training hyper parameters ----------------------------------------------
 MICRO_BATCH=${MICRO_BATCH:-1}
 TRAIN_ITERS=${TRAIN_ITERS:-10}
-MAX_SEQ_LEN=${MAX_SEQ_LEN:-8192}
-MAX_PIXELS=${MAX_PIXELS:-4194304}
-MIN_PIXELS=${MIN_PIXELS:-65536}
+MAX_SEQ_LEN=${MAX_SEQ_LEN:-1024}
+MAX_PIXELS=${MAX_PIXELS:-262144}
+MIN_PIXELS=${MIN_PIXELS:-4096}
 SCHEMA_ADAPTER=${SCHEMA_ADAPTER:-auto}
 RECURSIVE=${RECURSIVE:-false}
 EAGER_FILTER=${EAGER_FILTER:-false}
@@ -102,6 +104,8 @@ OVERRIDES+=("--model.pretrained_model_name_or_path=${MODEL_PATH}")
 OVERRIDES+=("--training.train_iters=${TRAIN_ITERS}")
 OVERRIDES+=("--training.micro_batch_size=${MICRO_BATCH}")
 OVERRIDES+=("--training.global_batch_size=${GLOBAL_BATCH}")
+OVERRIDES+=("--fsdp_config.dp_shard_size=${DP_SIZE}")
+OVERRIDES+=("--optimizer.fp32_main_params=true")
 OVERRIDES+=("--dataset.data_transform.max_seq_len=${MAX_SEQ_LEN}")
 OVERRIDES+=("--dataset.data_transform.max_pixels=${MAX_PIXELS}")
 OVERRIDES+=("--dataset.data_transform.min_pixels=${MIN_PIXELS}")
