@@ -427,6 +427,11 @@ def _resolve_dataloader_config(node: object, *, path: str) -> DataLoaderConfig:
         bool,
         path=f"{path}.data_sharding",
     )
+    block_shuffle = coerce_value(
+        target_node.pop("block_shuffle", True),
+        bool,
+        path=f"{path}.block_shuffle",
+    )
     target = _resolve_target(target_node, path=path)
     collate_fn = (
         None
@@ -445,6 +450,7 @@ def _resolve_dataloader_config(node: object, *, path: str) -> DataLoaderConfig:
         dataloader_type=dataloader_type,
         data_rearrange_map=data_rearrange_map,
         data_sharding=data_sharding,
+        block_shuffle=block_shuffle,
     )
 
 

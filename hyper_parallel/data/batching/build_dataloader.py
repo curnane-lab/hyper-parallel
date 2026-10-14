@@ -79,6 +79,29 @@ def _is_iterable_dataset(dataset: Any) -> bool:
     return is_iterable
 
 
+def _build_block_shuffle_mapping(blocks: Sequence[tuple[int, int]], *, seed: int) -> Any:
+    """Build one logical-to-physical permutation with IO-local block shuffle.
+
+    Block order is shuffled and samples are shuffled within each block, while
+    consecutive logical indices always stay inside one block. For lazy parquet
+    datasets whose blocks align with row groups, each decoded row group is
+    fully consumed before the next one is opened, so shuffled training does
+    not re-decode shards. The mapping is deterministic per seed; the same
+    pseudo-random order is reused every epoch (single sampler mode).
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    block_order = rng.permutation(len(blocks))
+    parts = []
+    for block_index in block_order:
+        start, length = blocks[int(block_index)]
+        parts.append(start + rng.permutation(length))
+    if not parts:
+        return None
+    return np.concatenate(parts)
+
+
 def _supports_output_index_for_resume(dataset: Any) -> bool:
     """Return whether a Dataset can emit and rebuild stable output indices."""
     get_item = getattr(dataset, "get_item", None)
@@ -217,6 +240,25 @@ def build_dataloader(
 
         batch_sampler = None
         if not _is_iterable_dataset(dataset):
+            seed = training_config.seed if training_config.seed is not None else default_seed
+            sampler_type = getattr(dataloader_target, "dataloader_type", "single")
+            rearrange_map = getattr(dataloader_target, "data_rearrange_map", None)
+            index_mapping = None
+            shuffle_blocks = getattr(dataset, "shuffle_blocks", None)
+            if (
+                    split_name == "train"
+                    and sampler_type == "single"
+                    and rearrange_map is None
+                    and getattr(dataloader_target, "block_shuffle", True)
+                    and shuffle_blocks
+                    and len(shuffle_blocks) > 1
+            ):
+                index_mapping = _build_block_shuffle_mapping(shuffle_blocks, seed=seed)
+                logger.info(
+                    "Block shuffle enabled for split=train: %d IO-local blocks over %d samples",
+                    len(shuffle_blocks),
+                    len(dataset),
+                )
             batch_sampler = build_dataset_batch_sampler(
                 total_samples=len(dataset),
                 micro_batch_size=training_config.micro_batch_size,
@@ -224,10 +266,11 @@ def build_dataloader(
                 dp_world_size=mesh_context.dp_size,
                 dp_rank=mesh_context.dp_rank,
                 drop_last=getattr(dataloader_target, "drop_last", True),
-                data_rearrange_map=getattr(dataloader_target, "data_rearrange_map", None),
-                sampler_type=getattr(dataloader_target, "dataloader_type", "single"),
+                index_mapping=index_mapping,
+                data_rearrange_map=rearrange_map,
+                sampler_type=sampler_type,
                 data_sharding=getattr(dataloader_target, "data_sharding", False),
-                seed=training_config.seed if training_config.seed is not None else default_seed,
+                seed=seed,
             )
 
         dataloaders[split_index] = dataloader_target.build(

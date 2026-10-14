@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+from collections import OrderedDict
 from fnmatch import fnmatch
 from collections.abc import Callable, Iterator
 from typing import Any, Optional, TypeAlias
@@ -97,14 +98,24 @@ class _ParquetShardIndex:
     lazily from the owning row group on first access. Row-group sizes vary per
     file, so a global prefix-sum maps each logical index to ``(file, group,
     local_index)``.
+
+    Decoded row groups are kept in a bounded LRU cache (``max_cached_groups``)
+    so sequentially consumed groups stay hot while the resident memory never
+    exceeds a few groups, however large the underlying shard set is.
     """
 
-    def __init__(self, files: list[str], columns: list[str] | None = None) -> None:
+    def __init__(
+            self,
+            files: list[str],
+            columns: list[str] | None = None,
+            max_cached_groups: int = 4,
+    ) -> None:
         self.files = files
         self.columns = columns
+        self._max_cached_groups = max(1, int(max_cached_groups))
         self._entries: list[tuple[int, int, int, int]] = []
         self._open_files: dict[int, pq.ParquetFile] = {}
-        self._group_cache: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        self._group_cache: OrderedDict[tuple[int, int], list[dict[str, Any]]] = OrderedDict()
         total = 0
         for file_index, path in enumerate(files):
             parquet_file = pq.ParquetFile(path)
@@ -127,14 +138,28 @@ class _ParquetShardIndex:
     def __len__(self) -> int:
         return self.total_rows
 
+    @property
+    def blocks(self) -> list[tuple[int, int]]:
+        """Return ``(start, length)`` logical runs that share one row group.
+
+        Consuming samples inside one block only touches a single decoded row
+        group, so block-aligned access patterns stay IO-local.
+        """
+        return [(start, rows) for _file, _group, start, rows in self._entries]
+
     def _read_group(self, file_index: int, group_index: int) -> list[dict[str, Any]]:
         cache_key = (file_index, group_index)
-        if cache_key not in self._group_cache:
-            parquet_file = self._open_files[file_index]
-            columns = self._file_columns[file_index]
-            table = parquet_file.read_row_group(group_index, columns=columns or None)
-            self._group_cache[cache_key] = table.to_pylist()
-        return self._group_cache[cache_key]
+        if cache_key in self._group_cache:
+            self._group_cache.move_to_end(cache_key)
+            return self._group_cache[cache_key]
+        parquet_file = self._open_files[file_index]
+        columns = self._file_columns[file_index]
+        table = parquet_file.read_row_group(group_index, columns=columns or None)
+        records = table.to_pylist()
+        self._group_cache[cache_key] = records
+        while len(self._group_cache) > self._max_cached_groups:
+            self._group_cache.popitem(last=False)
+        return records
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         for file_index, group_index, start, rows in self._entries:
@@ -174,6 +199,7 @@ class VLMDataset(Dataset):
             lazy_parquet: bool = True,
             recursive: bool = False,
             file_pattern: str = "*.parquet",
+            parquet_cache_groups: int = 4,
             **dataset_options: Any,
     ) -> None:
         """Load records or build the lazy parquet index."""
@@ -196,7 +222,11 @@ class VLMDataset(Dataset):
         elif source_type == "parquet":
             self.files = _expand_data_paths(data_path, recursive=recursive, file_pattern=file_pattern)
             if lazy_parquet:
-                self.parquet_index = _ParquetShardIndex(self.files, columns=dataset_options.get("columns"))
+                self.parquet_index = _ParquetShardIndex(
+                    self.files,
+                    columns=dataset_options.get("columns"),
+                    max_cached_groups=parquet_cache_groups,
+                )
                 self.records = []
             else:
                 self.parquet_index = None
@@ -261,6 +291,18 @@ class VLMDataset(Dataset):
             return len(self.parquet_index)
         return len(self.records)
 
+    @property
+    def shuffle_blocks(self) -> list[tuple[int, int]]:
+        """Return logical ``(start, length)`` runs that share IO locality.
+
+        The training DataLoader may shuffle at this block granularity so one
+        decoded parquet row group is fully consumed before moving to the next.
+        In-memory sources expose a single block covering the whole dataset.
+        """
+        if self.parquet_index is not None:
+            return self.parquet_index.blocks
+        return [(0, len(self.records))]
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         if self.parquet_index is not None:
             record = self.parquet_index[index]
@@ -285,6 +327,11 @@ class _TransformDataset(Dataset):
     The trainable-label index is built lazily on the first full iteration
     (epoch 0) and cached afterwards, so startup does not run the vision
     processor across the whole corpus when ``eager_filter=False``.
+
+    With ``eager_filter=False`` and ``skip_errors=True`` (the default),
+    records that fail the transform (unreadable images, truncated media,
+    schema errors) are skipped by advancing to the next source record,
+    so one bad sample cannot abort a multi-day training run.
     """
 
     def __init__(
@@ -293,10 +340,14 @@ class _TransformDataset(Dataset):
             transform: Optional[SampleTransform],
             *,
             eager_filter: bool = True,
+            skip_errors: bool = True,
+            max_error_skip: int = 64,
     ) -> None:
         self.source = source
         self.transform = transform
         self.eager_filter = eager_filter
+        self.skip_errors = skip_errors
+        self.max_error_skip = max(1, int(max_error_skip))
         self.indices: Optional[list[int]] = None
         if eager_filter:
             self._build_index()
@@ -326,12 +377,36 @@ class _TransformDataset(Dataset):
             return len(self.indices)
         return len(self.source)
 
+    @property
+    def shuffle_blocks(self) -> Optional[list[tuple[int, int]]]:
+        """Forward the source's IO-local blocks when no filtered index exists."""
+        if self.indices is not None:
+            return None
+        return getattr(self.source, "shuffle_blocks", None)
+
     def __getitem__(self, index: int) -> Any:
         if self.indices is not None:
             record = self.source[self.indices[index]]
             return self.transform(record) if self.transform is not None else record
-        record = self.source[index]
-        return self.transform(record) if self.transform is not None else record
+        if not self.skip_errors:
+            record = self.source[index]
+            return self.transform(record) if self.transform is not None else record
+        source_length = len(self.source)
+        if source_length == 0:
+            raise IndexError("VLM source dataset is empty")
+        last_error: Optional[Exception] = None
+        for offset in range(self.max_error_skip):
+            candidate = (index + offset) % source_length
+            try:
+                record = self.source[candidate]
+                return self.transform(record) if self.transform is not None else record
+            except Exception as exc:
+                last_error = exc
+                logger.warning("skipping unusable VLM record at source index %d: %s", candidate, exc)
+        raise RuntimeError(
+            f"failed to load {self.max_error_skip} consecutive VLM records; "
+            f"the dataset is likely unreadable"
+        ) from last_error
 
 
 class MixVLMDataset(Dataset):
@@ -372,6 +447,8 @@ class MixVLMDataset(Dataset):
             transform: Optional[SampleTransform] = None,
             *,
             eager_filter: bool = True,
+            parquet_cache_groups: int = 4,
+            skip_errors: bool = True,
     ) -> None:
         """Build one sub-dataset per source and the proportional index map.
 
@@ -398,32 +475,63 @@ class MixVLMDataset(Dataset):
                 lazy_parquet=data_config["lazy_parquet"],
                 recursive=bool(data_config.get("recursive", False)),
                 file_pattern=data_config.get("file_pattern", "*.parquet"),
+                parquet_cache_groups=int(data_config.get("parquet_cache_groups", parquet_cache_groups)),
             )
-            self.sub_datasets.append(_TransformDataset(source, transform, eager_filter=eager_filter))
+            self.sub_datasets.append(_TransformDataset(
+                source,
+                transform,
+                eager_filter=eager_filter,
+                skip_errors=skip_errors,
+            ))
             self.weights.append(float(entry.get("weight", 1.0)))
             self.names.append(name)
         total_weight = sum(self.weights)
         self._probabilities = [weight / total_weight for weight in self.weights]
         self._index_map: list[tuple[int, int]] = []
+        self._shuffle_blocks: list[tuple[int, int]] = []
         self._build_index_map()
 
     def _build_index_map(self) -> None:
-        """Interleave sub-dataset indices proportionally to their weights."""
+        """Interleave sub-dataset runs proportionally to their weights.
+
+        Runs align with each source's IO-local blocks (one parquet row group
+        per run for lazy parquet sources), so consecutive logical indices stay
+        inside a single decoded row group. This keeps block-shuffled training
+        IO-efficient even when shards hold one giant row group each.
+        """
+        runs_per_source: list[list[tuple[int, int]]] = []
+        for dataset in self.sub_datasets:
+            blocks = dataset.shuffle_blocks or [(0, len(dataset))]
+            runs_per_source.append([(start, length) for start, length in blocks if length > 0])
         cursors = [0] * len(self.sub_datasets)
+        appended = [0] * len(self.sub_datasets)
         total = sum(len(dataset) for dataset in self.sub_datasets)
         while len(self._index_map) < total:
             best_ratio = -1.0
-            best_source = 0
-            for source_index, dataset in enumerate(self.sub_datasets):
-                if cursors[source_index] >= len(dataset):
+            best_source = -1
+            for source_index, runs in enumerate(runs_per_source):
+                if cursors[source_index] >= len(runs):
                     continue
+                run_length = runs[cursors[source_index]][1]
                 target = self._probabilities[source_index] * total
-                ratio = (cursors[source_index] + 1) / target if target else 0.0
-                if ratio < best_ratio or best_ratio < 0:
+                ratio = (appended[source_index] + run_length) / target if target else 0.0
+                if best_source < 0 or ratio < best_ratio:
                     best_ratio = ratio
                     best_source = source_index
-            self._index_map.append((best_source, cursors[best_source]))
+            if best_source < 0:
+                break
+            run_start, run_length = runs_per_source[best_source][cursors[best_source]]
+            self._shuffle_blocks.append((len(self._index_map), run_length))
+            self._index_map.extend(
+                (best_source, local) for local in range(run_start, run_start + run_length)
+            )
+            appended[best_source] += run_length
             cursors[best_source] += 1
+
+    @property
+    def shuffle_blocks(self) -> list[tuple[int, int]]:
+        """Return logical runs aligned with the sub-datasets' row groups."""
+        return self._shuffle_blocks
 
     def __len__(self) -> int:
         return len(self._index_map)
@@ -447,12 +555,20 @@ def build_vlm_dataset(
     del tokenizer, mesh_context, training_config
     sources = data_config.get("sources")
     manifest = data_config.get("manifest")
+    parquet_cache_groups = int(data_config.get("parquet_cache_groups", 4))
+    skip_errors = bool(data_config.get("skip_errors", True))
     if sources is not None or manifest is not None:
         mix_sources = sources if sources is not None else manifest
         if not mix_sources or not isinstance(mix_sources, (list, str)):
             raise ValueError("data_config.sources/manifest must be a list or a manifest path")
         eager_filter = bool(data_config.get("eager_filter", True))
-        return MixVLMDataset(mix_sources, transform, eager_filter=eager_filter)
+        return MixVLMDataset(
+            mix_sources,
+            transform,
+            eager_filter=eager_filter,
+            parquet_cache_groups=parquet_cache_groups,
+            skip_errors=skip_errors,
+        )
 
     source_type = data_config.get("source_type", "online")
     if source_type not in {"online", "jsonl", "parquet"}:
@@ -469,8 +585,9 @@ def build_vlm_dataset(
         lazy_parquet=lazy_parquet,
         recursive=bool(data_config.get("recursive", False)),
         file_pattern=data_config.get("file_pattern", "*.parquet"),
+        parquet_cache_groups=parquet_cache_groups,
     )
-    return _TransformDataset(source, transform, eager_filter=eager_filter)
+    return _TransformDataset(source, transform, eager_filter=eager_filter, skip_errors=skip_errors)
 
 
 __all__ = ["VLMDataset", "MixVLMDataset", "build_vlm_dataset"]

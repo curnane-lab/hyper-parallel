@@ -28,6 +28,7 @@ import argparse
 import json
 import logging
 import os
+from collections import Counter
 from typing import Any
 from pathlib import Path
 
@@ -37,7 +38,19 @@ from hyper_parallel.data.vlm.schema_adapters import detect_adapter
 
 logger = logging.getLogger(__name__)
 
-_EXCLUDE_DIRS = {"images", "images_decoded", "kernel_meta", "__pycache__", ".ipynb_checkpoints"}
+_EXCLUDE_DIRS = {
+    "images",
+    "images_decoded",
+    "kernel_meta",
+    "__pycache__",
+    ".ipynb_checkpoints",
+    ".cache",
+    "parts",
+}
+
+# Directory name produced by the repack pipeline; when a dataset folder has
+# both raw parquet dumps and repacked shards, only the repacked ones train.
+_REPACK_DIR_NAME = "vlm_parquet"
 
 
 def _detect_schema(parquet_path: str) -> tuple[str, int, list[str]]:
@@ -80,6 +93,13 @@ def scan_dataset_root(
 
     manifest_datasets = []
     for name, files in sorted(groups.items()):
+        repacked = [entry for entry in files if _REPACK_DIR_NAME in Path(entry["path"]).parts]
+        if repacked and len(repacked) < len(files):
+            logger.info(
+                "dataset %s: using %d %s shards, ignoring %d raw parquet files",
+                name, len(repacked), _REPACK_DIR_NAME, len(files) - len(repacked),
+            )
+            files = repacked
         total_rows = 0
         schemas: set[str] = set()
         resolved_files = []
@@ -98,10 +118,16 @@ def scan_dataset_root(
             logger.warning("dataset %s has no readable parquet files; skipping", name)
             continue
         if len(schemas) > 1:
-            logger.warning("dataset %s mixes schemas %s; using the first file's adapter", name, sorted(schemas))
+            logger.warning("dataset %s mixes schemas %s; using the majority adapter", name, sorted(schemas))
+        adapter_counts = Counter(entry["schema_adapter"] for entry in resolved_files)
+        majority_adapter = adapter_counts.most_common(1)[0][0]
+        if majority_adapter == "unknown" and len(adapter_counts) > 1:
+            known = [(adapter, count) for adapter, count in adapter_counts.most_common() if adapter != "unknown"]
+            if known:
+                majority_adapter = known[0][0]
         manifest_datasets.append({
             "name": name,
-            "schema_adapter": resolved_files[0]["schema_adapter"],
+            "schema_adapter": majority_adapter,
             "weight": weight,
             "total_rows": total_rows,
             "num_files": len(resolved_files),

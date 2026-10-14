@@ -162,9 +162,25 @@ manifest 示例：
 
 ## 6. 加权混合采样
 
-`MixVLMDataset` 按 weight 比例把逻辑索引交错分配给各数据集，保证每个 global batch 的数据配比稳定。weight 3:1 时实测前 100 条分布为精确的 75:25。
+`MixVLMDataset` 按 weight 比例把逻辑索引交错分配给各数据集。交错以「run」为粒度——一个 run 对应源数据集的一个 parquet row group，保证相邻逻辑索引落在同一个已解码的 row group 内，配合训练侧的块级 shuffle（见 §7）不会反复解码分片。
 
-## 7. 常见问题
+## 7. 块级 shuffle 与 IO 局部性
+
+`dataloader_type: single`（VLM 默认）下，DataLoader 会读取数据集的 `shuffle_blocks`（每个 parquet row group 一个块），自动生成「块间 shuffle + 块内 shuffle」的逻辑→物理索引映射（`block_shuffle: true` 默认开启）。效果：
+
+- 每个 row group 只解码一次、整块消费完毕再切下一块，大分片（如单 row group 数百 MB 的分片）不会因随机访问被反复解码；
+- 解码缓存是有上限的 LRU（`data_config.parquet_cache_groups`，默认 4 个组），内存占用与数据集总大小无关；
+- 同一映射每个 epoch 复用（确定性、支持断点续训）；设为 `block_shuffle: false` 可退回纯顺序读取。
+
+其他新增开关：
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `data_config.parquet_cache_groups` | 4 | 每个数据源常驻的解码 row group 上限 |
+| `data_config.skip_errors` | true | 单条样本解码/变换失败时跳到下一条，不中断训练 |
+| `data_transform.drop_image_truncated_sample` | true | 图像 vision token 超过 `max_seq_len` 时丢弃整条样本，而不是在无图情况下训练文本答案 |
+
+## 8. 常见问题
 
 **Q: 启动时卡在全量数据处理？**
 `eager_filter` 设为 `false`。
@@ -176,7 +192,10 @@ manifest 和内联 sources 都天然支持——每个数据集独立建索引�
 在 `schema_adapters.py` 加一个 `@register_adapter` 函数（约 10 行），或者把样本列名给维护者加一个。
 
 **Q: parquet 太大内存不够？**
-`lazy_parquet: true`（默认）只保留 row-group 索引和 LRU 缓存，按需读取。
+`lazy_parquet: true`（默认）只保留 row-group 索引和有上限的 LRU 缓存，按需读取。
 
 **Q: 目录里有非 parquet 文件（图片、JSON 等）？**
-`file_pattern: "*.parquet"` 过滤；图片目录（如 `images/`）在扫描时自动跳过。
+`file_pattern: "*.parquet"` 过滤；图片目录（如 `images/`）、`.cache`、`parts/` 在扫描时自动跳过。
+
+**Q: 数据集目录里既有原始 parquet 又有 repack 后的 `vlm_parquet/`？**
+`build_manifest` 只收 `vlm_parquet/` 下的分片，自动忽略同目录下的原始 parquet，避免 schema 错配或重复训练。

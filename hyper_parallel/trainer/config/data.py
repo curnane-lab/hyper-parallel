@@ -68,6 +68,7 @@ class DataLoaderConfig:
     dataloader_type: Literal["single", "cyclic"] = "single"
     data_rearrange_map: Any = None
     data_sharding: bool = False
+    block_shuffle: bool = True
 
     def build(self, **runtime_kwargs: Any) -> Any:
         """Build the DataLoader target with runtime Dataset arguments."""
@@ -85,4 +86,5 @@ class DataLoaderConfig:
         config["dataloader_type"] = self.dataloader_type
         config["data_rearrange_map"] = _serialize_config_value(self.data_rearrange_map)
         config["data_sharding"] = self.data_sharding
+        config["block_shuffle"] = self.block_shuffle
         return config

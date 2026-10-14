@@ -47,12 +47,25 @@ class VLMChatTransform:
             max_seq_len: int = 256,
             min_pixels: int = 65536,
             max_pixels: int = 16777216,
+            drop_image_truncated_sample: bool = True,
     ) -> None:
-        """Store the processor and target sequence length."""
+        """Store the processor and target sequence length.
+
+        Args:
+            processor: Qwen3-VL processor (tokenizer + image/video processors).
+            max_seq_len: Target sequence length for truncation and padding.
+            min_pixels: Lower pixel budget forwarded to the image processor.
+            max_pixels: Upper pixel budget forwarded to the image processor.
+            drop_image_truncated_sample: When True, a sample whose image vision
+                tokens exceed ``max_seq_len`` raises instead of silently training
+                the text answer without the image. Dataset wrappers skip such
+                records; disable to keep the legacy zero-out behavior.
+        """
         self.processor = processor
         self.max_seq_len = max_seq_len
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
+        self.drop_image_truncated_sample = drop_image_truncated_sample
 
     @staticmethod
     def _load_images(images: Any) -> list[Any]:
@@ -141,11 +154,14 @@ class VLMChatTransform:
 
     def _drop_truncated_images(
             self, sample: dict[str, torch.Tensor], max_len: int
-    ) -> dict[str, torch.Tensor]:
-        """Drop images whose vision-token run extends past ``max_len``."""
+    ) -> tuple[dict[str, torch.Tensor], int]:
+        """Drop images whose vision-token run extends past ``max_len``.
+
+        Returns the updated sample and the number of dropped images.
+        """
         grid = sample["image_grid_thw"]
         if grid.numel() == 0:
-            return sample
+            return sample, 0
 
         runs = self._modal_runs(sample["mm_token_type_ids"])
         keep = 0
@@ -154,8 +170,9 @@ class VLMChatTransform:
                 break
             keep += 1
         if keep == int(grid.shape[0]):
-            return sample
+            return sample, 0
 
+        dropped = int(grid.shape[0]) - keep
         mm = sample["mm_token_type_ids"].clone()
         input_ids = sample["input_ids"].clone()
         attention_mask = sample["attention_mask"].clone()
@@ -173,14 +190,20 @@ class VLMChatTransform:
         pixel_rows = sum(int(g[0]) * int(g[1]) * int(g[2]) for g in grid[:keep])
         sample["pixel_values"] = sample["pixel_values"][:pixel_rows]
         sample["image_grid_thw"] = grid[:keep]
-        return sample
+        return sample, dropped
 
     def _truncate_and_pad(self, sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Truncate (dropping cut images) and pad sequence fields to ``max_seq_len``."""
         max_len = self.max_seq_len
         seq_len = int(sample["input_ids"].shape[0])
         if seq_len > max_len:
-            sample = self._drop_truncated_images(sample, max_len)
+            sample, dropped = self._drop_truncated_images(sample, max_len)
+            if dropped and self.drop_image_truncated_sample:
+                raise ValueError(
+                    f"{dropped} image(s) exceed max_seq_len={max_len} after encoding "
+                    f"(sequence length {seq_len}); raise max_seq_len, lower max_pixels, "
+                    f"or set drop_image_truncated_sample=False to keep the legacy behavior"
+                )
             for field in _SEQ_FIELDS:
                 sample[field] = sample[field][:max_len]
 
@@ -235,6 +258,7 @@ def build_vlm_data_transform(
         max_seq_len: int = 256,
         min_pixels: int = 65536,
         max_pixels: int = 16777216,
+        drop_image_truncated_sample: bool = True,
         **transform_options: Any,
 ) -> VLMChatTransform:
     """Build the VLM sample transform.
@@ -242,6 +266,10 @@ def build_vlm_data_transform(
     Args:
         processor: Qwen3-VL processor used to render and encode conversations.
         max_seq_len: Target sequence length for truncation and padding.
+        min_pixels: Lower pixel budget forwarded to the image processor.
+        max_pixels: Upper pixel budget forwarded to the image processor.
+        drop_image_truncated_sample: Skip samples whose image no longer fits
+            into ``max_seq_len`` instead of training text without the image.
         **transform_options: Reserved model-specific transform options.
 
     Returns:
@@ -258,6 +286,7 @@ def build_vlm_data_transform(
         max_seq_len=max_seq_len,
         min_pixels=min_pixels,
         max_pixels=max_pixels,
+        drop_image_truncated_sample=drop_image_truncated_sample,
     )
 
 
