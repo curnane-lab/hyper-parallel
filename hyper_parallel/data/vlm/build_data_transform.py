@@ -14,7 +14,10 @@
 # ============================================================================
 """Build the VLM multimodal sample transform."""
 
+import base64
 import re
+import io
+from pathlib import Path
 from typing import Any, Optional
 
 import torch
@@ -37,10 +40,40 @@ class VLMChatTransform:
         max_seq_len: Target sequence length for truncation and padding.
     """
 
-    def __init__(self, processor: Any, *, max_seq_len: int = 256) -> None:
+    def __init__(
+            self,
+            processor: Any,
+            *,
+            max_seq_len: int = 256,
+            min_pixels: int = 65536,
+            max_pixels: int = 16777216,
+    ) -> None:
         """Store the processor and target sequence length."""
         self.processor = processor
         self.max_seq_len = max_seq_len
+        self.min_pixels = min_pixels
+        self.max_pixels = max_pixels
+
+    @staticmethod
+    def _load_images(images: Any) -> list[Any]:
+        """Load local paths, base64 data URIs, and embedded bytes into PIL images."""
+        from PIL import Image
+
+        loaded = []
+        for image in images or []:
+            if isinstance(image, str) and image.startswith("data:image/"):
+                image = Image.open(io.BytesIO(base64.b64decode(image.split(",", 1)[1])))
+            elif isinstance(image, (bytes, bytearray)):
+                image = Image.open(io.BytesIO(image))
+            elif isinstance(image, str):
+                if Path(image).is_file():
+                    image = Image.open(image)
+                else:
+                    continue
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            loaded.append(image)
+        return loaded
 
     def _normalize_messages(self, messages: Any, images: Any = None) -> Any:
         """Split ``<image>``/``<video>`` string placeholders into content-list parts."""
@@ -59,14 +92,21 @@ class VLMChatTransform:
                                 f"message content contains a {token} placeholder but no matching media is available"
                             )
                         media_type = "image" if token == "<image>" else "video"
-                        parts.append({"type": media_type, "url": image_queue.pop(0)})
+                        media = image_queue.pop(0)
+                        parts.append({"type": media_type, "url": media})
                     elif token:
                         parts.append({"type": "text", "text": token})
                 content = parts
             normalized.append({"role": message.get("role"), "content": content})
         return normalized
 
-    def _encode(self, messages: Any, *, add_generation_prompt: bool) -> dict[str, Any]:
+    def _encode(
+            self,
+            messages: Any,
+            *,
+            add_generation_prompt: bool,
+            image_kwargs: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
         """Render and encode one conversation with the processor."""
         chat_template = getattr(self.processor, "chat_template", None)
         if not chat_template:
@@ -79,6 +119,7 @@ class VLMChatTransform:
             add_generation_prompt=add_generation_prompt,
             enable_thinking=False,
             chat_template=chat_template,
+            **(image_kwargs or {}),
         )
 
     @staticmethod
@@ -155,19 +196,32 @@ class VLMChatTransform:
 
     def __call__(self, record: dict[str, Any]) -> dict[str, torch.Tensor]:
         """Encode one record into a padded model sample."""
-        messages = self._normalize_messages(record["messages"], record.get("images"))
-        full = self._encode(messages, add_generation_prompt=False)
-        prompt = self._encode(messages[:-1], add_generation_prompt=True)
+        images = self._load_images(record.get("images"))
+        messages = self._normalize_messages(record["messages"], images)
+        for message in messages:
+            if isinstance(message.get("content"), str):
+                message["content"] = [{"type": "text", "text": message["content"]}]
+        image_kwargs = {"min_pixels": self.min_pixels, "max_pixels": self.max_pixels}
+        full = self._encode(messages, add_generation_prompt=False, image_kwargs=image_kwargs)
+        prompt = self._encode(
+            messages[:-1], add_generation_prompt=True, image_kwargs=image_kwargs
+        )
         prompt_len = len(prompt["input_ids"][0])
 
         input_ids = torch.tensor(full["input_ids"][0], dtype=torch.long)
+        mm = full.get("mm_token_type_ids")
+        if mm is None:
+            image_token_id = int(getattr(self.processor, "image_token_id", -1))
+            if image_token_id < 0:
+                image_token_id = int(getattr(getattr(self.processor, "tokenizer", None), "image_token_id", -1))
+            mm = (input_ids == image_token_id).long().unsqueeze(0)
         labels = input_ids.clone()
         labels[:prompt_len] = IGNORE_INDEX
 
         sample = {
             "input_ids": input_ids,
             "attention_mask": torch.tensor(full["attention_mask"][0], dtype=torch.long),
-            "mm_token_type_ids": torch.tensor(full["mm_token_type_ids"][0], dtype=torch.long),
+            "mm_token_type_ids": torch.tensor(mm[0], dtype=torch.long),
             "labels": labels,
             "pixel_values": full["pixel_values"],
             "image_grid_thw": full["image_grid_thw"],
@@ -179,6 +233,8 @@ def build_vlm_data_transform(
         *,
         processor: Any = None,
         max_seq_len: int = 256,
+        min_pixels: int = 65536,
+        max_pixels: int = 16777216,
         **transform_options: Any,
 ) -> VLMChatTransform:
     """Build the VLM sample transform.
@@ -197,7 +253,12 @@ def build_vlm_data_transform(
     del transform_options
     if processor is None:
         raise ValueError("processor is required for the VLM data transform")
-    return VLMChatTransform(processor, max_seq_len=max_seq_len)
+    return VLMChatTransform(
+        processor,
+        max_seq_len=max_seq_len,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+    )
 
 
 __all__ = ["VLMChatTransform", "build_vlm_data_transform"]

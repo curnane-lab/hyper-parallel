@@ -25,7 +25,7 @@ re-export VLM symbols flat.
 from hyper_parallel.data.vlm.build_data_transform import build_vlm_data_transform
 from hyper_parallel.data.vlm.build_processor import build_processor
 from hyper_parallel.data.vlm.collator import build_vlm_collator
-from hyper_parallel.data.vlm.dataset import build_vlm_dataset
+from hyper_parallel.data.vlm.dataset import MixVLMDataset, VLMDataset, build_vlm_dataset
 from hyper_parallel.data.vlm.get_batch import (
     VLMBatchProcessor,
     VLMGetBatch,
@@ -33,7 +33,9 @@ from hyper_parallel.data.vlm.get_batch import (
 )
 
 __all__ = [
+    "MixVLMDataset",
     "VLMBatchProcessor",
+    "VLMDataset",
     "VLMGetBatch",
     "build_processor",
     "build_vlm_collator",
