@@ -117,10 +117,12 @@ python -m hyper_parallel.data.vlm.build_manifest \
 
 `build_manifest` 会：
 
-1. 递归扫描根目录下所有 `**/*.parquet`（跳过 `images/`、`kernel_meta/` 等非数据目录）；
+1. 递归扫描根目录下所有 `**/*.parquet`（跳过 `images/`、`kernel_meta/`、`.cache`、`parts/` 等非数据目录；数据集文件夹内若同时存在原始 parquet 和 repack 后的 `vlm_parquet/`，只收 `vlm_parquet/`）；
 2. 按顶层文件夹归组为独立数据集；
-3. 对每个数据集检测 schema adapter、统计行数；
-4. 输出结构化 manifest。
+3. 对每个数据集按多数投票检测 schema adapter、统计行数；
+4. 输出结构化 manifest，文件路径为相对于 `--data-root` 的 POSIX 相对路径。
+
+manifest 是可移植的：加载时相对路径优先按 `data_root` 字段解析，该目录不存在时退回 manifest 所在目录。把 manifest 放在数据集根目录（默认输出位置），整套目录搬到任何机器都能直接用；`run_vlm_train.sh` 的 WEIGHTS 权重覆盖流程也兼容。omnidoc_vlm（18 个文档数据集、448 万行）的现成 manifest 见 `examples/qwen3_8/omnidoc_vlm_manifest.example.json`，复制为数据集根目录下的 `dataset_manifest.json` 即可。
 
 第二步，YAML 只引用 manifest：
 
@@ -144,7 +146,7 @@ manifest 示例：
       "weight": 1.0,
       "total_rows": 239650,
       "num_files": 1,
-      "files": [{"path": "/mnt/.../hw_chinese_ocr_train.parquet", "rows": 239650, "schema_adapter": "qwen_vl"}]
+      "files": [{"path": "hw_chinese_ocr/vlm_parquet/hw_chinese_ocr_train.parquet", "rows": 239650, "schema_adapter": "qwen_vl"}]
     },
     {
       "name": "fintabnet_otsl",
@@ -152,7 +154,7 @@ manifest 示例：
       "weight": 2.0,
       "total_rows": 88441,
       "num_files": 13,
-      "files": [{"path": "/mnt/.../train-00000-of-00013-....parquet", "rows": 6804, "schema_adapter": "fintabnet_otsl"}]
+      "files": [{"path": "fintabnet_otsl/vlm_parquet/train-00000-of-00013-....parquet", "rows": 6804, "schema_adapter": "fintabnet_otsl"}]
     }
   ]
 }

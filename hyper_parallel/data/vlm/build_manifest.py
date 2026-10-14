@@ -86,7 +86,10 @@ def scan_dataset_root(
             continue
         dataset_name = parts[0]
         groups.setdefault(dataset_name, []).append({
-            "path": str(path),
+            # POSIX-style path relative to data_root, so the manifest stays
+            # usable when the dataset root is mounted elsewhere (the loader
+            # resolves relative entries against data_root / the manifest dir).
+            "path": path.relative_to(root).as_posix(),
             "rows": None,
             "schema_adapter": None,
         })
@@ -105,7 +108,7 @@ def scan_dataset_root(
         resolved_files = []
         for entry in files:
             try:
-                adapter, rows, _columns = _detect_schema(entry["path"])
+                adapter, rows, _columns = _detect_schema(str(root / entry["path"]))
             except Exception as exc:
                 logger.warning("skip unreadable parquet %s: %s", entry["path"], exc)
                 continue

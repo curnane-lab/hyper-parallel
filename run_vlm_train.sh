@@ -27,9 +27,10 @@
 #   MICRO_BATCH       (default 1)
 #   GLOBAL_BATCH      (default = MICRO_BATCH * dp_size, one micro-step)
 #   TRAIN_ITERS       (default 10)
-#   MAX_SEQ_LEN       (default 1024)
-#   MAX_PIXELS        (default 262144)  image token budget (~area/1024)
-#   MIN_PIXELS        (default 4096)
+#   MAX_SEQ_LEN       (default 8192)
+#   MAX_PIXELS        (default 4194304) image token budget (~area/784);
+#                                doc pages need ~1-4M px to stay readable
+#   MIN_PIXELS        (default 65536)
 #   SCHEMA_ADAPTER    (default auto)    qwen_vl | fintabnet_otsl | llava |
 #                                       image_text_pair | auto
 #   RECURSIVE         (default false)   recursive scan for dir DATA_PATH
@@ -72,9 +73,9 @@ RDZV_ID=${RDZV_ID:-qwen38_vlm_$$}
 # ---- training hyper parameters ----------------------------------------------
 MICRO_BATCH=${MICRO_BATCH:-1}
 TRAIN_ITERS=${TRAIN_ITERS:-10}
-MAX_SEQ_LEN=${MAX_SEQ_LEN:-1024}
-MAX_PIXELS=${MAX_PIXELS:-262144}
-MIN_PIXELS=${MIN_PIXELS:-4096}
+MAX_SEQ_LEN=${MAX_SEQ_LEN:-8192}
+MAX_PIXELS=${MAX_PIXELS:-4194304}
+MIN_PIXELS=${MIN_PIXELS:-65536}
 SCHEMA_ADAPTER=${SCHEMA_ADAPTER:-auto}
 RECURSIVE=${RECURSIVE:-false}
 EAGER_FILTER=${EAGER_FILTER:-false}

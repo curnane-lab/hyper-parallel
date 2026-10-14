@@ -419,17 +419,34 @@ class MixVLMDataset(Dataset):
 
     @staticmethod
     def _load_manifest(manifest_path: str) -> list[dict[str, Any]]:
-        """Expand a build_manifest output into per-dataset source entries."""
+        """Expand a build_manifest output into per-dataset source entries.
+
+        Relative ``files[].path`` entries (the build_manifest default) resolve
+        against the manifest's ``data_root`` when it exists, otherwise against
+        the manifest's own directory — so a manifest sitting at the dataset
+        root works unchanged across machines.
+        """
         with open(manifest_path, "r", encoding="utf-8") as handle:
             manifest = json.load(handle)
+        data_root = manifest.get("data_root")
+        if data_root and os.path.isdir(data_root):
+            base_dir = os.fspath(data_root)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(manifest_path))
         sources = []
         for dataset in manifest.get("datasets", []):
             if dataset.get("schema_adapter") in (None, "unknown"):
                 logger.warning("manifest dataset %s has no schema adapter; skipping", dataset.get("name"))
                 continue
+            file_paths = []
+            for entry in dataset["files"]:
+                path = os.fspath(entry["path"])
+                if not os.path.isabs(path):
+                    path = os.path.normpath(os.path.join(base_dir, path))
+                file_paths.append(path)
             sources.append({
                 "name": dataset["name"],
-                "data_path": [entry["path"] for entry in dataset["files"]],
+                "data_path": file_paths,
                 "data_config": {
                     "source_type": "parquet",
                     "schema_adapter": dataset["schema_adapter"],
