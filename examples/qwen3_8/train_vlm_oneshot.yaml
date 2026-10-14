@@ -70,9 +70,11 @@ compile:
 dataset:
   data_transform:
     _target_: hyper_parallel.data.vlm.build_data_transform.build_vlm_data_transform
-    max_seq_len: 1024
-    min_pixels: 4096
-    max_pixels: 262144
+    # Document VLM defaults: doc pages need ~1-4M pixels and long targets
+    # (HTML/markdown) need room beyond the vision tokens.
+    max_seq_len: 8192
+    min_pixels: 65536
+    max_pixels: 4194304
   _target_: hyper_parallel.data.vlm.dataset.build_vlm_dataset
   data_config:
     manifest: null
