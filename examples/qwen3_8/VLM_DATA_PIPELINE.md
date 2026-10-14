@@ -181,6 +181,7 @@ manifest 示例：
 | `data_config.parquet_cache_groups` | 4 | 每个数据源常驻的解码 row group 上限 |
 | `data_config.skip_errors` | true | 单条样本解码/变换失败时跳到下一条，不中断训练 |
 | `data_transform.drop_image_truncated_sample` | true | 图像 vision token 超过 `max_seq_len` 时丢弃整条样本，而不是在无图情况下训练文本答案 |
+| `data_transform.train_all_turns` | true | 多轮对话中每一轮 assistant 回答都参与训练（旧行为只训练最后一轮）；多轮 QA 数据集（如 FineVision 系列）的监督信号不再浪费 |
 
 ## 8. 常见问题
 

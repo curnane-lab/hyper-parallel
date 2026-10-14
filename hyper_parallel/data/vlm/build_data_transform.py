@@ -32,8 +32,9 @@ class VLMChatTransform:
 
     ``messages`` follows the Qwen3-VL content-list format
     (``{"type": "image", "url": ...}`` / ``{"type": "text", "text": ...}``), and
-    ``<image>`` string placeholders are also accepted. The final ``assistant``
-    turn is the training target; the preceding prompt is masked with -100.
+    ``<image>`` string placeholders are also accepted. Every ``assistant`` turn
+    is a training target (``train_all_turns``); user/system context is masked
+    with -100.
 
     Args:
         processor: Qwen3-VL processor (tokenizer + image/video processors).
@@ -48,6 +49,7 @@ class VLMChatTransform:
             min_pixels: int = 65536,
             max_pixels: int = 16777216,
             drop_image_truncated_sample: bool = True,
+            train_all_turns: bool = True,
     ) -> None:
         """Store the processor and target sequence length.
 
@@ -60,12 +62,17 @@ class VLMChatTransform:
                 tokens exceed ``max_seq_len`` raises instead of silently training
                 the text answer without the image. Dataset wrappers skip such
                 records; disable to keep the legacy zero-out behavior.
+            train_all_turns: When True (default), every ``assistant`` turn in a
+                multi-turn conversation is a training target; only user/system
+                context is masked. When False, only the final assistant turn is
+                trained (legacy behavior).
         """
         self.processor = processor
         self.max_seq_len = max_seq_len
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
         self.drop_image_truncated_sample = drop_image_truncated_sample
+        self.train_all_turns = train_all_turns
 
     @staticmethod
     def _load_images(images: Any) -> list[Any]:
@@ -226,10 +233,6 @@ class VLMChatTransform:
                 message["content"] = [{"type": "text", "text": message["content"]}]
         image_kwargs = {"min_pixels": self.min_pixels, "max_pixels": self.max_pixels}
         full = self._encode(messages, add_generation_prompt=False, image_kwargs=image_kwargs)
-        prompt = self._encode(
-            messages[:-1], add_generation_prompt=True, image_kwargs=image_kwargs
-        )
-        prompt_len = len(prompt["input_ids"][0])
 
         input_ids = torch.tensor(full["input_ids"][0], dtype=torch.long)
         mm = full.get("mm_token_type_ids")
@@ -238,8 +241,32 @@ class VLMChatTransform:
             if image_token_id < 0:
                 image_token_id = int(getattr(getattr(self.processor, "tokenizer", None), "image_token_id", -1))
             mm = (input_ids == image_token_id).long().unsqueeze(0)
-        labels = input_ids.clone()
-        labels[:prompt_len] = IGNORE_INDEX
+
+        labels = torch.full_like(input_ids, IGNORE_INDEX)
+        if self.train_all_turns:
+            train_turns = [i for i, message in enumerate(messages) if message.get("role") == "assistant"]
+        else:
+            train_turns = [len(messages) - 1]
+        seq_len = int(input_ids.shape[0])
+        for turn in train_turns:
+            if turn == 0:
+                start = 0
+            else:
+                prefix = self._encode(
+                    messages[:turn], add_generation_prompt=True, image_kwargs=image_kwargs
+                )
+                start = len(prefix["input_ids"][0])
+            if turn == len(messages) - 1:
+                end = seq_len
+            else:
+                through_turn = self._encode(
+                    messages[:turn + 1], add_generation_prompt=False, image_kwargs=image_kwargs
+                )
+                end = len(through_turn["input_ids"][0])
+            start = min(start, seq_len)
+            end = min(end, seq_len)
+            if start < end:
+                labels[start:end] = input_ids[start:end]
 
         sample = {
             "input_ids": input_ids,
@@ -259,6 +286,7 @@ def build_vlm_data_transform(
         min_pixels: int = 65536,
         max_pixels: int = 16777216,
         drop_image_truncated_sample: bool = True,
+        train_all_turns: bool = True,
         **transform_options: Any,
 ) -> VLMChatTransform:
     """Build the VLM sample transform.
@@ -270,6 +298,8 @@ def build_vlm_data_transform(
         max_pixels: Upper pixel budget forwarded to the image processor.
         drop_image_truncated_sample: Skip samples whose image no longer fits
             into ``max_seq_len`` instead of training text without the image.
+        train_all_turns: Train every assistant turn of multi-turn
+            conversations, not only the final one.
         **transform_options: Reserved model-specific transform options.
 
     Returns:
@@ -287,6 +317,7 @@ def build_vlm_data_transform(
         min_pixels=min_pixels,
         max_pixels=max_pixels,
         drop_image_truncated_sample=drop_image_truncated_sample,
+        train_all_turns=train_all_turns,
     )
 
 
