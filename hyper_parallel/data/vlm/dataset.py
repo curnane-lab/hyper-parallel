@@ -445,12 +445,14 @@ def build_vlm_dataset(
 ) -> Any:
     """Build a transform-wrapped VLM dataset from one source or a mix."""
     del tokenizer, mesh_context, training_config
-    if "sources" in data_config or "manifest" in data_config:
-        sources = data_config.get("sources") or data_config.get("manifest")
-        if not sources or (not isinstance(sources, (list, str))):
+    sources = data_config.get("sources")
+    manifest = data_config.get("manifest")
+    if sources is not None or manifest is not None:
+        mix_sources = sources if sources is not None else manifest
+        if not mix_sources or not isinstance(mix_sources, (list, str)):
             raise ValueError("data_config.sources/manifest must be a list or a manifest path")
         eager_filter = bool(data_config.get("eager_filter", True))
-        return MixVLMDataset(sources, transform, eager_filter=eager_filter)
+        return MixVLMDataset(mix_sources, transform, eager_filter=eager_filter)
 
     source_type = data_config.get("source_type", "online")
     if source_type not in {"online", "jsonl", "parquet"}:
