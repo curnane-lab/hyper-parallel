@@ -110,7 +110,27 @@ bash examples/qwen3_6_moe/launch_1node_8dies.sh \
 `ep_size × edp_shard_size = world_size / pp_size`。当前为单个 pipeline stage，因此右侧就是
 `world_size`：8 卡配置使用 `ep_size=2`、`edp_shard_size=4`。
 
-## 4. Loss 曲线对比
+## 4. 多机 VLM
+
+[`launch_vlm_multinode.sh`](launch_vlm_multinode.sh) 在每个节点执行同一条命令，用 c10d
+rendezvous 分配 rank，不需要 `NODE_RANK`。`RDZV_ID` 在所有节点上必须相同；默认值由节点数和
+每节点卡数决定，并发任务请自行设置不同的 id。拓扑为 `dp_shard = NNODES × NPROC_PER_NODE`、
+`edp_shard = dp_shard / EP_SIZE`（默认 `EP_SIZE=1`，VLM 保持 TP=CP=PP=1）。图像预算与上游
+`run_vlm_train.sh` 一致：`max_seq_len=8192`、`min_pixels=65536`、`max_pixels=4194304`。
+
+```bash
+# 每个节点
+MASTER_ADDR=<rank0-ip> NNODES=4 \
+MODEL_PATH=/path/to/Qwen3.6-35B-A3B \
+DATA_PATH=/path/to/train.parquet \
+OUTPUT_DIR=/path/to/outputs \
+bash examples/qwen3_6_moe/launch_vlm_multinode.sh
+```
+
+`MANIFEST` 指向 `dataset_manifest.json` 时走混合数据集；`WEIGHTS=name:weight,...` 覆盖采样权重。
+`DATA_PATH` 以 `.json` 结尾时同样按 manifest 读取。
+
+## 5. Loss 曲线对比
 
 ![Qwen3.6 MoE FSDP、CP 与 EP 的 100-step loss 曲线](loss_comparison.png)
 

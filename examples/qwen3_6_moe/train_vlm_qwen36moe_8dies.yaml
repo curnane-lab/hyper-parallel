@@ -1,5 +1,8 @@
-# Qwen3.6-35B-A3B (MoE) VLM training: 8 dies, FSDP + EP, CP=1 (VLM path).
-# Topology: world=8, dp_size=8, dp_shard=8, edp_shard=4, ep=2.
+# Qwen3.6-35B-A3B (MoE) VLM baseline for launch_vlm_multinode.sh.
+# Every field that launcher overrides is present so typed CLI overrides resolve.
+# Launch replaces topology: dp_shard = nnodes * nproc_per_node,
+# edp_shard = dp_shard / ep_size, with TP=CP=PP=1.
+# Values below match one 8-die node and ep_size=1.
 model:
   _target_: hyper_parallel.models.HyperAutoModelForImageTextToText.from_pretrained
   pretrained_model_name_or_path: /data1/models/Qwen3.6-35B-A3B
@@ -79,12 +82,16 @@ compile:
 dataset:
   data_transform:
     _target_: hyper_parallel.data.vlm.build_data_transform.build_vlm_data_transform
-    max_seq_len: 1024
-    min_pixels: 4096
-    max_pixels: 65536
+    # Document VLM defaults, same as upstream run_vlm_train.sh: doc pages need
+    # ~1-4M pixels and long targets need room beyond the vision tokens.
+    max_seq_len: 8192
+    min_pixels: 65536
+    max_pixels: 4194304
   _target_: hyper_parallel.data.vlm.dataset.build_vlm_dataset
   data_path: /data1/f00538480/dataset/HW_Chinese/hw_chinese_ocr_train_tiny.parquet
   data_config:
+    manifest: null
+    sources: null
     source_type: parquet
     schema_adapter: auto
     lazy_parquet: true
